@@ -1,0 +1,23 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+data/
+brain/
+*.log
+.DS_Store
+.venv/
+# internal/generated files (stay local)
+dump_code.py
+project_code_dump.txt
+# internal project docs (stay local)
+CLAUDE.MD
+ARCHITECTURE.md
+PROJECT_SUMMARY.md
+Task.md
+Task_status.md
+solution.md
+Universal_Prompt_2.md
