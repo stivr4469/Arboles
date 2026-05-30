@@ -76,7 +76,7 @@ class TestFireAlarms:
         assert drain.ad_id is None  # account-level alarm, не per-ad
 
     def test_no_alarm_on_normal_operation(self):
-        df = pd.DataFrame([make_row("ad_001", spend=100.0, clicks=200)])
+        df = pd.DataFrame([make_row("ad_001", spend=100.0, clicks=200, conversions=5)])
         alarms = PatternEngine.detect_fire_alarms(df, baseline_avg_spend=90.0)
         assert alarms == []
 
@@ -99,3 +99,42 @@ class TestFireAlarms:
             df, baseline_avg_spend=100.0, drain_multiplier=1.2
         )
         assert any(a.alarm_type == "BUDGET_DRAIN" for a in alarms)
+
+
+class TestZeroLeads:
+    def test_zero_leads_detected_at_40_clicks(self):
+        df = pd.DataFrame([make_row("ad_001", spend=30.0, clicks=40, conversions=0)])
+        alarms = PatternEngine.detect_fire_alarms(df)
+        assert any(a.alarm_type == "ZERO_LEADS" for a in alarms)
+        assert any(a.ad_id == "ad_001" for a in alarms)
+
+    def test_zero_leads_not_triggered_below_40_clicks(self):
+        # 39 кликов — ещё статистически незначимо
+        df = pd.DataFrame([make_row("ad_001", spend=30.0, clicks=39, conversions=0)])
+        alarms = PatternEngine.detect_fire_alarms(df)
+        assert not any(a.alarm_type == "ZERO_LEADS" for a in alarms)
+
+    def test_zero_leads_not_triggered_when_conversions_exist(self):
+        df = pd.DataFrame([make_row("ad_001", spend=30.0, clicks=50, conversions=1)])
+        alarms = PatternEngine.detect_fire_alarms(df)
+        assert not any(a.alarm_type == "ZERO_LEADS" for a in alarms)
+
+    def test_zero_leads_severity_is_critical(self):
+        df = pd.DataFrame([make_row("ad_001", spend=30.0, clicks=40, conversions=0)])
+        alarms = PatternEngine.detect_fire_alarms(df)
+        alarm = next(a for a in alarms if a.alarm_type == "ZERO_LEADS")
+        assert alarm.severity == "CRITICAL"
+
+    def test_zero_leads_threshold_is_configurable(self):
+        # порог 20 кликов — срабатывает раньше
+        df = pd.DataFrame([make_row("ad_001", spend=30.0, clicks=20, conversions=0)])
+        alarms = PatternEngine.detect_fire_alarms(df, min_clicks_for_zero_leads=20)
+        assert any(a.alarm_type == "ZERO_LEADS" for a in alarms)
+
+    def test_utm_break_and_zero_leads_dont_overlap(self):
+        # UTM_BREAK: clicks=0. ZERO_LEADS: clicks>=40. Не могут быть одновременно.
+        df = pd.DataFrame([make_row("ad_001", spend=50.0, clicks=0, conversions=0)])
+        alarms = PatternEngine.detect_fire_alarms(df)
+        types = {a.alarm_type for a in alarms}
+        assert "UTM_BREAK" in types
+        assert "ZERO_LEADS" not in types

@@ -26,12 +26,11 @@ class Onboarding(StatesGroup):
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     await message.answer(
-        "<b>Добро пожаловать в Ad-Pilot!</b>\n\n"
-        "Я — ваш арбитражный копилот. Отправляю утренние отчёты в 08:30 UTC "
-        "и сигнализирую о критических ситуациях в реальном времени.\n\n"
-        "Команды:\n"
+        "<b>Привет! Я Ad-Pilot.</b>\n\n"
+        "Каждое утро в 08:30 присылаю отчёт по твоим объявлениям.\n"
+        "Если что-то идёт не так — сразу пишу.\n\n"
         "/connect — подключить Facebook и Keitaro\n"
-        "/report — получить отчёт прямо сейчас\n"
+        "/report — отчёт прямо сейчас\n"
         "/help — справка",
     )
 
@@ -39,10 +38,9 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("connect"))
 async def cmd_connect(message: Message, state: FSMContext) -> None:
     await message.answer(
-        "🔗 <b>Подключение источников данных</b>\n\n"
-        "Шаг 1 из 3. Отправьте ваш <b>Meta System User Token</b>.\n\n"
-        "<i>Токен будет немедленно зашифрован (AES-256-GCM) и сохранён. "
-        "Сообщение автоматически удалится.</i>"
+        "Шаг 1 из 3.\n\n"
+        "Отправь <b>Meta System User Token</b>.\n"
+        "<i>Сообщение удалится автоматически, токен сохранится зашифрованным.</i>"
     )
     await state.set_state(Onboarding.waiting_for_fb_token)
 
@@ -61,9 +59,9 @@ async def process_fb_token(message: Message, state: FSMContext) -> None:
         pass  # нет прав на удаление — не критично
 
     await message.answer(
-        "✅ Токен Facebook принят и зашифрован.\n\n"
-        "Шаг 2 из 3. Отправьте URL вашего Keitaro "
-        "(например: <code>https://tracker.myteam.com</code>):"
+        "✅ Токен принят.\n\n"
+        "Шаг 2 из 3.\n"
+        "Отправь адрес Keitaro, например: <code>https://tracker.myteam.com</code>"
     )
     await state.set_state(Onboarding.waiting_for_keitaro_url)
 
@@ -77,9 +75,10 @@ async def process_keitaro_url(message: Message, state: FSMContext) -> None:
 
     await state.update_data(keitaro_url=url)
     await message.answer(
-        "✅ URL принят.\n\n"
-        "Шаг 3 из 3. Отправьте <b>API-ключ Keitaro</b> (Admin key).\n\n"
-        "<i>Сообщение автоматически удалится.</i>"
+        "✅ Адрес принят.\n\n"
+        "Шаг 3 из 3.\n"
+        "Отправь <b>API-ключ Keitaro</b> (Admin key).\n"
+        "<i>Сообщение удалится автоматически.</i>"
     )
     await state.set_state(Onboarding.waiting_for_keitaro_key)
 
@@ -146,10 +145,9 @@ async def process_keitaro_key(message: Message, state: FSMContext) -> None:
 
         await state.clear()
         await message.answer(
-            "🎉 <b>Интеграция успешно завершена!</b>\n\n"
-            "Настройки сохранены и зашифрованы.\n"
-            "Первые данные начнут собираться в течение часа.\n"
-            "Утренний отчёт придёт завтра в <b>08:30 UTC</b>."
+            "🎉 Готово! Всё подключено.\n\n"
+            "Данные начнут собираться в течение часа.\n"
+            "Первый отчёт — завтра в 08:30."
         )
         logger.info("Onboarding complete for telegram user_id=%s", message.from_user.id)
 
@@ -157,31 +155,28 @@ async def process_keitaro_key(message: Message, state: FSMContext) -> None:
         logger.exception("Onboarding DB write failed for user_id=%s", message.from_user.id)
         await state.clear()
         await message.answer(
-            "❌ Ошибка при сохранении настроек. Попробуйте /connect снова "
-            "или обратитесь в поддержку."
+            "❌ Что-то пошло не так. Попробуй /connect ещё раз."
         )
 
 
 @router.message(Command("report"))
 async def cmd_report(message: Message) -> None:
-    await message.answer("⏳ Генерирую отчёт...")
+    await message.answer("⏳ Считаю...")
     try:
         from src.collector.tasks import send_morning_report_task
         send_morning_report_task.delay()
-        await message.answer("✅ Задача запущена. Отчёт придёт через несколько секунд.")
+        await message.answer("✅ Отчёт придёт через несколько секунд.")
     except Exception as e:
         logger.exception("Failed to trigger report: %s", e)
-        await message.answer("❌ Ошибка запуска задачи. Проверьте логи.")
+        await message.answer("❌ Не удалось запустить. Проверь логи.")
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(
-        "<b>Ad-Pilot — справка</b>\n\n"
-        "/connect — подключить Facebook и Keitaro (онбординг)\n"
-        "/report — запросить отчёт вручную\n"
-        "/start — начало работы\n"
-        "/help — эта справка\n\n"
-        "<i>Автоматические отчёты приходят каждый день в 08:30 UTC.\n"
-        "Fire Alarms — немедленно при критических событиях.</i>",
+        "/connect — подключить Facebook и Keitaro\n"
+        "/report — получить отчёт прямо сейчас\n"
+        "/start — начало работы\n\n"
+        "<i>Отчёт каждый день в 08:30. "
+        "Если что-то сломалось — напишу сразу.</i>",
     )

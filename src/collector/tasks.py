@@ -161,62 +161,46 @@ def send_morning_report_task(self, tenant_id: str = TENANT_ID) -> None:
 
 
 def _format_report(roi_list, burnout_signals, scale_candidates) -> str:
-    """Форматирует недирективный Pain-first отчёт."""
     from datetime import date as dt_date
     today_str = dt_date.today().strftime("%d.%m.%Y")
 
-    losers = [r for r in roi_list if r.roi_pct < -5.0]
-    losers.sort(key=lambda r: r.roi_pct)
+    losers = sorted([r for r in roi_list if r.roi_pct < -5.0], key=lambda r: r.roi_pct)
 
-    lines = [
-        "<b>📊 Утренний аудит Ad-Pilot</b>",
-        f"<i>{today_str} · 08:30 UTC</i>",
-        "",
-    ]
+    lines = [f"<b>📊 Отчёт за {today_str}</b>", ""]
 
     if losers:
-        lines.append("<b>🔴 Слив бюджета (Упущенная выгода)</b>")
+        lines.append("🔴 <b>Минус:</b>")
         for r in losers[:5]:
             lines.append(
-                f"• Объявление: <code>{r.ad_id}</code>\n"
-                f"  <b>Наблюдение:</b> Расход: ${r.spend:.0f} | Доход: ${r.revenue:.0f} | ROI: <b>{r.roi_pct:.1f}%</b>\n"
-                f"  <b>Гипотеза:</b> Связка теряет эффективность или аудитория выгорела.\n"
-                f"  <b>Рекомендация:</b> Проверить показатели в кабинете или временно снизить ставку."
+                f"• <code>{r.ad_id}</code> — расход ${r.spend:.0f}, "
+                f"доход ${r.revenue:.0f}, ROI {r.roi_pct:.0f}%"
             )
     else:
-        lines.append("<b>🔴 Потерь не обнаружено</b> — все активные связки работают в плюс.")
+        lines.append("🔴 Убыточных нет — всё в плюсе.")
     lines.append("")
 
     if burnout_signals:
-        lines.append("<b>🟡 Анализ выгорания CTR</b>")
+        lines.append("🟡 <b>Выгорание:</b>")
         for s in burnout_signals[:5]:
             lines.append(
-                f"• Объявление: <code>{s.ad_id}</code>\n"
-                f"  <b>Наблюдение:</b> CTR снизился на <b>{s.ctr_drop_pct:.0f}%</b> "
-                f"(с {s.avg_baseline_ctr * 100:.2f}% до {s.avg_recent_ctr * 100:.2f}%).\n"
-                f"  <b>Гипотеза:</b> Снижение вовлеченности из-за усталости от креатива.\n"
-                f"  <b>Рекомендация:</b> Рассмотреть уникализацию или замену креатива."
+                f"• <code>{s.ad_id}</code> — CTR упал на {s.ctr_drop_pct:.0f}% "
+                f"({s.avg_baseline_ctr * 100:.2f}% → {s.avg_recent_ctr * 100:.2f}%)"
             )
     else:
-        lines.append("<b>🟡 Сигналов о выгорании CTR не обнаружено.</b>")
+        lines.append("🟡 Выгорания нет.")
     lines.append("")
 
     if scale_candidates:
-        lines.append("<b>🟢 Кандидаты на масштабирование (Эксперименты)</b>")
+        lines.append("🟢 <b>Можно увеличить бюджет:</b>")
         for c in scale_candidates[:5]:
             lines.append(
-                f"• Объявление: <code>{c.ad_id}</code>\n"
-                f"  <b>Наблюдение:</b> ROI на <b>+{c.relative_roi_pct:.1f}%</b> выше среднего по кабинету | "
-                f"ROI: {c.roi_pct:.0f}% | Конверсий: {c.conversions}\n"
-                f"  <b>Рекомендация:</b> Рассмотреть аккуратное увеличение дневного бюджета на 15-20% в качестве теста."
+                f"• <code>{c.ad_id}</code> — ROI {c.roi_pct:.0f}%, "
+                f"лидов {c.conversions}, расход ${c.daily_spend:.0f}/день"
             )
     else:
-        lines.append("<b>🟢 Стабильных кандидатов на масштабирование не найдено.</b>")
+        lines.append("🟢 Кандидатов для масштаба нет.")
 
-    lines.append("")
-    lines.append(f"<b>Всего активных объявлений в анализе:</b> {len(roi_list)}")
-    lines.append("<i>Все рекомендации носят характер рабочих гипотез. Принимайте решения взвешенно.</i>")
-
+    lines.append(f"\n<i>Объявлений в анализе: {len(roi_list)}</i>")
     return "\n".join(lines)
 
 
@@ -282,19 +266,22 @@ def fire_alarm_check_task(self, tenant_id: str = TENANT_ID) -> int:
 def _format_fire_alarm(alarm: FireAlarm) -> str:
     if alarm.alarm_type == "UTM_BREAK":
         return (
-            "🚨 <b>FIRE ALARM: Нет кликов при активных расходах</b>\n\n"
-            f"• Объявление: <code>{alarm.ad_id}</code>\n"
-            f"  <b>Наблюдение:</b> {alarm.message}\n"
-            f"  <b>Гипотеза:</b> UTM-метки сломаны или трекер не получает трафик.\n"
-            f"  <b>Рекомендация:</b> Немедленно проверить ссылки в объявлении "
-            f"и статус Keitaro."
+            f"🚨 <b>Деньги идут, клики не приходят</b>\n"
+            f"Объявление: <code>{alarm.ad_id}</code>\n"
+            f"{alarm.message}\n"
+            f"→ Проверь ссылку в объявлении и статус Keitaro."
         )
     if alarm.alarm_type == "BUDGET_DRAIN":
         return (
-            "🚨 <b>FIRE ALARM: Аномальный рост расходов</b>\n\n"
-            f"  <b>Наблюдение:</b> {alarm.message}\n"
-            f"  <b>Гипотеза:</b> Ставки вышли из-под контроля или "
-            f"запустилось неконтролируемое масштабирование.\n"
-            f"  <b>Рекомендация:</b> Проверить лимиты бюджетов в Facebook Ads Manager."
+            f"🚨 <b>Расход вырос в разы</b>\n"
+            f"{alarm.message}\n"
+            f"→ Проверь лимиты бюджетов в Facebook Ads Manager."
+        )
+    if alarm.alarm_type == "ZERO_LEADS":
+        return (
+            f"🚨 <b>Клики есть, лидов нет</b>\n"
+            f"Объявление: <code>{alarm.ad_id}</code>\n"
+            f"{alarm.message}\n"
+            f"→ Проверь лендинг и форму заявки."
         )
     return f"🚨 <b>FIRE ALARM [{alarm.alarm_type}]</b>\n{alarm.message}"

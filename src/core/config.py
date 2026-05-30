@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     # App
     environment: str = "development"
     debug: bool = True
+    tenant_timezone: str = "UTC"
 
 
 settings = Settings()

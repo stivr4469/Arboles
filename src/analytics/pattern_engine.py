@@ -33,7 +33,7 @@ class ScaleCandidate:
 
 @dataclass
 class FireAlarm:
-    alarm_type: str   # 'UTM_BREAK' | 'BUDGET_DRAIN'
+    alarm_type: str   # 'UTM_BREAK' | 'BUDGET_DRAIN' | 'ZERO_LEADS'
     ad_id: str | None
     message: str
     severity: str     # 'CRITICAL' | 'WARNING'
@@ -120,7 +120,7 @@ class PatternEngine:
         ctr_drop_threshold: float = 0.30,
         recent_window_days: int = 3,
         baseline_window_days: int = 7,
-        min_impressions_threshold: int = 500,
+        min_impressions_threshold: int = 3000,
     ) -> list[BurnoutSignal]:
         """Поиск выгоревших креативов.
 
@@ -233,11 +233,14 @@ class PatternEngine:
         baseline_avg_spend: float = 0.0,
         min_spend_for_alarm: float = 10.0,
         drain_multiplier: float = 2.0,
+        min_clicks_for_zero_leads: int = 40,
     ) -> list[FireAlarm]:
         """Детектирует критические аномалии для немедленного Fire Alarm.
 
         UTM_BREAK:    spend > min_spend_for_alarm и clicks == 0 (per ad_id).
         BUDGET_DRAIN: суммарный дневной spend > drain_multiplier × baseline_avg_spend.
+        ZERO_LEADS:   clicks >= min_clicks_for_zero_leads и conversions == 0.
+                      Не пересекается с UTM_BREAK (clicks==0 исключён).
         """
         if today_df.empty:
             return []
@@ -247,6 +250,7 @@ class PatternEngine:
         for _, row in today_df.iterrows():
             spend = float(row.get("spend", 0))
             clicks = int(row.get("clicks", 0))
+            conversions = int(row.get("conversions", 0))
             ad_id = str(row.get("ad_id", ""))
 
             if spend > min_spend_for_alarm and clicks == 0:
@@ -254,6 +258,13 @@ class PatternEngine:
                     alarm_type="UTM_BREAK",
                     ad_id=ad_id,
                     message=f"Расход ${spend:.0f}, кликов 0. Трекер не фиксирует переходы.",
+                    severity="CRITICAL",
+                ))
+            elif clicks >= min_clicks_for_zero_leads and conversions == 0:
+                alarms.append(FireAlarm(
+                    alarm_type="ZERO_LEADS",
+                    ad_id=ad_id,
+                    message=f"{clicks} кликов, 0 лидов. Связка не конвертит.",
                     severity="CRITICAL",
                 ))
 
