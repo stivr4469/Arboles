@@ -12,7 +12,12 @@ from src.core.config import settings
 from src.core.clickhouse import insert_rows, query as ch_query
 from src.core.encryption import decrypt
 from src.core.database import AsyncSessionLocal
-from src.collector.facebook import get_spend_data, FBAuthError, FBUnavailableError
+from src.collector.facebook import (
+    get_spend_data,
+    check_account_status,
+    FBAuthError,
+    FBUnavailableError,
+)
 from src.collector.keitaro import KeitaroClient, KeitaroAuthError, KeitaroUnavailableError
 from src.analytics.pattern_engine import PatternEngine, FireAlarm
 from src.data_gen.synthetic import generate_aggregated
@@ -72,6 +77,19 @@ def collect_fb_task(self, tenant_id: str = TENANT_ID) -> int:
             for fb_act_id, enc_token, iv, tag in accounts:
                 try:
                     access_token = decrypt(bytes(enc_token), bytes(iv), bytes(tag))
+
+                    # ── проверка здоровья аккаунта ─────────────────────────
+                    fb_status = check_account_status(fb_act_id, access_token)
+                    asyncio.run(_update_account_status_db(tenant_id, fb_act_id, fb_status))
+
+                    if not fb_status.is_healthy:
+                        logger.warning(
+                            "collect_fb_task: account %s is %s (%s), skipping insights",
+                            fb_act_id, fb_status.status_label, fb_status.disable_reason_label,
+                        )
+                        continue
+
+                    # ── сбор расходов ──────────────────────────────────────
                     account_rows = get_spend_data(
                         account_id=fb_act_id,
                         date_from=yesterday,
@@ -80,6 +98,7 @@ def collect_fb_task(self, tenant_id: str = TENANT_ID) -> int:
                         access_token=access_token,
                     )
                     rows.extend(account_rows)
+
                 except FBAuthError:
                     logger.error("collect_fb_task: FB token invalid for account %s, skipping", fb_act_id)
                 except FBUnavailableError as exc:
@@ -173,7 +192,11 @@ def send_morning_report_task(self, tenant_id: str = TENANT_ID) -> None:
         burnout_signals = PatternEngine.detect_burnout(df)
         scale_candidates = PatternEngine.detect_scale_candidates(df)
 
-        report = _format_report(roi_list, burnout_signals, scale_candidates)
+        # Блок здоровья аккаунтов — читаем последний известный статус из БД
+        account_rows = asyncio.run(_get_all_accounts_status(tenant_id))
+        health_block = _format_account_health(account_rows)
+
+        report = _format_report(roi_list, burnout_signals, scale_candidates, health_block)
 
         chat_id = settings.telegram_admin_chat_id
         if chat_id:
@@ -199,13 +222,98 @@ def send_morning_report_task(self, tenant_id: str = TENANT_ID) -> None:
         raise self.retry(exc=exc)
 
 
-def _format_report(roi_list, burnout_signals, scale_candidates) -> str:
+async def _update_account_status_db(tenant_id: str, fb_act_id: str, status) -> None:
+    """Сохраняет результат check_account_status в ad_accounts."""
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            await session.execute(
+                text("SET LOCAL app.current_tenant_id = :tid"), {"tid": tenant_id}
+            )
+            await session.execute(
+                text(
+                    "UPDATE ad_accounts SET "
+                    "last_status_code = :code, "
+                    "last_disable_reason = :reason, "
+                    "status_checked_at = NOW(), "
+                    "is_active = :is_active "
+                    "WHERE tenant_id = :tid AND fb_act_id = :fb_act_id"
+                ),
+                {
+                    "code": status.status_code,
+                    "reason": status.disable_reason_code,
+                    "is_active": status.is_healthy,
+                    "tid": uuid.UUID(tenant_id),
+                    "fb_act_id": fb_act_id,
+                },
+            )
+
+
+async def _get_all_accounts_status(tenant_id: str) -> list:
+    """Читает все FB-аккаунты тенанта с последним известным статусом."""
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            text("SET LOCAL app.current_tenant_id = :tid"), {"tid": tenant_id}
+        )
+        result = await session.execute(
+            text(
+                "SELECT fb_act_id, is_active, last_status_code, last_disable_reason "
+                "FROM ad_accounts WHERE tenant_id = :tid "
+                "ORDER BY is_active DESC, fb_act_id"
+            ),
+            {"tid": uuid.UUID(tenant_id)},
+        )
+        return result.fetchall()
+
+
+def _format_account_health(accounts: list) -> str:
+    """Форматирует блок «Статус аккаунтов» для утреннего отчёта."""
+    if not accounts:
+        return ""
+
+    _PROBLEM_LABELS = {
+        2: ("❌", "Заблокирован"),
+        3: ("⚠️", "Ошибка биллинга"),
+        7: ("⚠️", "На проверке (Risk Review)"),
+        101: ("❌", "Закрыт"),
+    }
+
+    problems = []
+    active_count = 0
+
+    for fb_act_id, is_active, status_code, disable_reason in accounts:
+        if status_code is None:
+            # Статус ещё не проверялся (аккаунт только добавлен)
+            if is_active:
+                active_count += 1
+        elif status_code == 1:
+            active_count += 1
+        elif status_code in _PROBLEM_LABELS:
+            icon, label = _PROBLEM_LABELS[status_code]
+            problems.append(f"• {icon} {label}: <code>{fb_act_id}</code>")
+        else:
+            problems.append(f"• ⚠️ Статус {status_code}: <code>{fb_act_id}</code>")
+
+    if not problems and active_count == 0:
+        return ""
+
+    lines = ["🏥 <b>Статус аккаунтов:</b>"]
+    lines.extend(problems)
+    if active_count:
+        lines.append(f"• ✅ Активны: {active_count} аккаунт(ов).")
+    return "\n".join(lines)
+
+
+def _format_report(roi_list, burnout_signals, scale_candidates, health_block: str = "") -> str:
     from datetime import date as dt_date
     today_str = dt_date.today().strftime("%d.%m.%Y")
 
     losers = sorted([r for r in roi_list if r.roi_pct < -5.0], key=lambda r: r.roi_pct)
 
     lines = [f"<b>📊 Отчёт за {today_str}</b>", ""]
+
+    if health_block:
+        lines.append(health_block)
+        lines.append("")
 
     if losers:
         lines.append("🔴 <b>Минус:</b>")

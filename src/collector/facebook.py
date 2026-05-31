@@ -1,5 +1,6 @@
 import json
 import logging
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -15,6 +16,25 @@ _SAMPLE_PATH = Path(__file__).parent.parent.parent / "data" / "sample" / "fb_ads
 # Fields returned by the Insights API (revenue/conversions come from Keitaro)
 _FIELDS = "ad_id,spend,impressions,clicks,date_start"
 
+# Meta API account_status codes
+_STATUS_LABELS: dict[int, str] = {
+    1: "ACTIVE",
+    2: "DISABLED",
+    3: "UNSETTLED",
+    7: "PENDING_RISK_REVIEW",
+    101: "CLOSED",
+}
+
+# Meta API disable_reason codes (subset of known values)
+_DISABLE_REASON_LABELS: dict[int, str] = {
+    0: "",
+    1: "Policy Violation",
+    2: "IP Review",
+    3: "Billing Issue",
+    4: "Gray Account Shutdown",
+    7: "Permanent Close",
+}
+
 
 class FBAuthError(Exception):
     """Token invalid or expired (API code 190 / HTTP 401). No retry."""
@@ -26,6 +46,19 @@ class FBRateLimitError(Exception):
 
 class FBUnavailableError(Exception):
     """FB API unreachable or returned 5xx. Retry."""
+
+
+@dataclass
+class FBAccountStatus:
+    account_id: str
+    status_code: int            # 1=ACTIVE, 2=DISABLED, 3=UNSETTLED, 7=PENDING_RISK_REVIEW, 101=CLOSED
+    status_label: str           # human-readable
+    disable_reason_code: int    # 0 if N/A
+    disable_reason_label: str   # human-readable reason, empty if no issue
+
+    @property
+    def is_healthy(self) -> bool:
+        return self.status_code == 1
 
 
 def get_spend_data(
@@ -46,6 +79,42 @@ def get_spend_data(
         logger.debug("FB API: no token/account_id — using CSV fallback")
         return _load_from_csv(date_from, date_to, account_id, tenant_id)
     return _fetch_from_api(account_id, date_from, date_to, tenant_id, access_token)
+
+
+def check_account_status(account_id: str, access_token: str) -> FBAccountStatus:
+    """
+    Fetch real-time account health from Meta API.
+    Endpoint: GET /{act_id}?fields=account_status,disable_reason
+
+    Raises FBAuthError if token is invalid.
+    Raises FBUnavailableError on network issues or 5xx.
+    """
+    act_id = account_id if account_id.startswith("act_") else f"act_{account_id}"
+    params = {
+        "fields": "account_status,disable_reason",
+        "access_token": access_token,
+    }
+    with httpx.Client(timeout=15.0) as client:
+        try:
+            resp = client.get(f"{_GRAPH_BASE}/{act_id}", params=params)
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            raise FBUnavailableError(f"FB API unreachable: {exc}") from exc
+
+    _raise_for_error(resp)
+    body = resp.json()
+
+    status_code = int(body.get("account_status", 0))
+    disable_reason_code = int(body.get("disable_reason", 0))
+
+    return FBAccountStatus(
+        account_id=act_id,
+        status_code=status_code,
+        status_label=_STATUS_LABELS.get(status_code, f"UNKNOWN({status_code})"),
+        disable_reason_code=disable_reason_code,
+        disable_reason_label=_DISABLE_REASON_LABELS.get(
+            disable_reason_code, f"code_{disable_reason_code}"
+        ),
+    )
 
 
 # ── internal ──────────────────────────────────────────────────────────────────

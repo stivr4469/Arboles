@@ -7,6 +7,8 @@ import httpx
 
 from src.collector.facebook import (
     get_spend_data,
+    check_account_status,
+    FBAccountStatus,
     FBAuthError,
     FBRateLimitError,
     FBUnavailableError,
@@ -165,3 +167,74 @@ class TestFBApiErrors:
         with patch("src.collector.facebook.httpx.Client", return_value=mock_ctx):
             with pytest.raises(FBUnavailableError):
                 get_spend_data(ACCOUNT_ID, YESTERDAY, TODAY, "t1", TOKEN)
+
+
+class TestCheckAccountStatus:
+    def _run(self, body: dict, http_status: int = 200) -> FBAccountStatus:
+        mock_get = Mock(return_value=_mock_resp(body, http_status))
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value.get = mock_get
+        with patch("src.collector.facebook.httpx.Client", return_value=mock_ctx):
+            return check_account_status("act_123456789", TOKEN)
+
+    def test_active_account_is_healthy(self):
+        status = self._run({"account_status": 1, "disable_reason": 0})
+        assert status.is_healthy is True
+        assert status.status_label == "ACTIVE"
+        assert status.disable_reason_label == ""
+
+    def test_disabled_returns_not_healthy(self):
+        status = self._run({"account_status": 2, "disable_reason": 1})
+        assert status.is_healthy is False
+        assert status.status_label == "DISABLED"
+
+    def test_unsettled_returns_not_healthy(self):
+        status = self._run({"account_status": 3, "disable_reason": 3})
+        assert status.is_healthy is False
+        assert status.status_label == "UNSETTLED"
+
+    def test_pending_risk_review_returns_not_healthy(self):
+        status = self._run({"account_status": 7, "disable_reason": 0})
+        assert status.is_healthy is False
+        assert status.status_label == "PENDING_RISK_REVIEW"
+
+    def test_closed_returns_not_healthy(self):
+        status = self._run({"account_status": 101, "disable_reason": 0})
+        assert status.is_healthy is False
+        assert status.status_label == "CLOSED"
+
+    def test_unknown_status_code_returns_not_healthy(self):
+        status = self._run({"account_status": 999, "disable_reason": 0})
+        assert status.is_healthy is False
+        assert "999" in status.status_label
+
+    def test_policy_violation_disable_reason_label(self):
+        status = self._run({"account_status": 2, "disable_reason": 1})
+        assert status.disable_reason_label == "Policy Violation"
+
+    def test_billing_disable_reason_label(self):
+        status = self._run({"account_status": 3, "disable_reason": 3})
+        assert status.disable_reason_label == "Billing Issue"
+
+    def test_account_id_stored_on_result(self):
+        status = self._run({"account_status": 1, "disable_reason": 0})
+        assert status.account_id == "act_123456789"
+
+    def test_act_prefix_added_if_missing(self):
+        mock_get = Mock(return_value=_mock_resp({"account_status": 1, "disable_reason": 0}))
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value.get = mock_get
+        with patch("src.collector.facebook.httpx.Client", return_value=mock_ctx):
+            check_account_status("123456789", TOKEN)
+        assert "act_123456789" in mock_get.call_args[0][0]
+
+    def test_auth_error_propagated(self):
+        with pytest.raises(FBAuthError):
+            self._run({"error": {"code": 190, "message": "Invalid token"}}, http_status=400)
+
+    def test_network_timeout_propagated(self):
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value.get.side_effect = httpx.TimeoutException("")
+        with patch("src.collector.facebook.httpx.Client", return_value=mock_ctx):
+            with pytest.raises(FBUnavailableError):
+                check_account_status("act_123", TOKEN)
