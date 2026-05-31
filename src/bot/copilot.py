@@ -19,6 +19,7 @@ _ONBOARDING_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
 class Onboarding(StatesGroup):
     waiting_for_fb_token = State()
+    waiting_for_fb_account_id = State()
     waiting_for_keitaro_url = State()
     waiting_for_keitaro_key = State()
 
@@ -60,7 +61,29 @@ async def process_fb_token(message: Message, state: FSMContext) -> None:
 
     await message.answer(
         "✅ Токен принят.\n\n"
-        "Шаг 2 из 3.\n"
+        "Шаг 2 из 4.\n"
+        "Отправь ID рекламного кабинета Facebook.\n"
+        "Найди его в Business Manager → Рекламные аккаунты.\n"
+        "Формат: <code>act_123456789</code>"
+    )
+    await state.set_state(Onboarding.waiting_for_fb_account_id)
+
+
+@router.message(Onboarding.waiting_for_fb_account_id)
+async def process_fb_account_id(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    fb_act_id = raw if raw.startswith("act_") else f"act_{raw}"
+    if not fb_act_id.removeprefix("act_").isdigit():
+        await message.answer(
+            "❌ Не похоже на ID кабинета. Должно быть только цифры или act_<цифры>.\n"
+            "Попробуй ещё раз."
+        )
+        return
+
+    await state.update_data(fb_act_id=fb_act_id)
+    await message.answer(
+        f"✅ Кабинет <code>{fb_act_id}</code> принят.\n\n"
+        "Шаг 3 из 4.\n"
         "Отправь адрес Keitaro, например: <code>https://tracker.myteam.com</code>"
     )
     await state.set_state(Onboarding.waiting_for_keitaro_url)
@@ -76,7 +99,7 @@ async def process_keitaro_url(message: Message, state: FSMContext) -> None:
     await state.update_data(keitaro_url=url)
     await message.answer(
         "✅ Адрес принят.\n\n"
-        "Шаг 3 из 3.\n"
+        "Шаг 4 из 4.\n"
         "Отправь <b>API-ключ Keitaro</b> (Admin key).\n"
         "<i>Сообщение удалится автоматически.</i>"
     )
@@ -92,6 +115,7 @@ async def process_keitaro_key(message: Message, state: FSMContext) -> None:
 
     user_data = await state.get_data()
     fb_token: str = user_data["fb_token"]
+    fb_act_id: str = user_data["fb_act_id"]
     keitaro_url: str = user_data["keitaro_url"]
 
     try:
@@ -112,15 +136,15 @@ async def process_keitaro_key(message: Message, state: FSMContext) -> None:
                 await session.execute(
                     text(
                         "INSERT INTO ad_accounts "
-                        "(tenant_id, platform, account_id, encrypted_token, token_iv, token_tag) "
-                        "VALUES (:tid, 'facebook', :account_id, :token, :iv, :tag) "
-                        "ON CONFLICT (tenant_id, platform, account_id) DO UPDATE "
+                        "(tenant_id, fb_act_id, encrypted_token, token_iv, token_tag) "
+                        "VALUES (:tid, :fb_act_id, :token, :iv, :tag) "
+                        "ON CONFLICT (tenant_id, fb_act_id) DO UPDATE "
                         "SET encrypted_token=EXCLUDED.encrypted_token, "
                         "    token_iv=EXCLUDED.token_iv, token_tag=EXCLUDED.token_tag"
                     ),
                     {
                         "tid": _ONBOARDING_TENANT_ID,
-                        "account_id": str(message.from_user.id),
+                        "fb_act_id": fb_act_id,
                         "token": fb_cipher, "iv": fb_iv, "tag": fb_tag,
                     },
                 )

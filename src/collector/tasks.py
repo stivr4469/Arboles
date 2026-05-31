@@ -12,7 +12,7 @@ from src.core.config import settings
 from src.core.clickhouse import insert_rows, query as ch_query
 from src.core.encryption import decrypt
 from src.core.database import AsyncSessionLocal
-from src.collector.facebook import get_spend_data
+from src.collector.facebook import get_spend_data, FBAuthError, FBUnavailableError
 from src.collector.keitaro import KeitaroClient, KeitaroAuthError, KeitaroUnavailableError
 from src.analytics.pattern_engine import PatternEngine, FireAlarm
 from src.data_gen.synthetic import generate_aggregated
@@ -38,21 +38,60 @@ def _telegram_send(chat_id: str, text: str) -> None:
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=900)
 def collect_fb_task(self, tenant_id: str = TENANT_ID) -> int:
-    """Hourly: загрузить FB spend за последний час, записать в ClickHouse."""
+    """Hourly: загрузить FB spend из Marketing API, записать в ClickHouse.
+
+    Читает учётные данные из ad_accounts (fb_act_id + зашифрованный токен).
+    Если аккаунты не настроены — фолбэк на sample CSV (dev-режим).
+    """
+    async def get_fb_accounts():
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text("SET LOCAL app.current_tenant_id = :tid"), {"tid": tenant_id}
+            )
+            result = await session.execute(
+                text(
+                    "SELECT fb_act_id, encrypted_token, token_iv, token_tag "
+                    "FROM ad_accounts WHERE tenant_id = :tid AND is_active = true"
+                ),
+                {"tid": uuid.UUID(tenant_id)},
+            )
+            return result.fetchall()
+
     try:
         today = date.today()
         yesterday = today - timedelta(days=1)
-        rows = get_spend_data(
-            account_id="",
-            date_from=yesterday,
-            date_to=today,
-            tenant_id=tenant_id,
-        )
+
+        accounts = asyncio.run(get_fb_accounts())
+
+        if not accounts:
+            # Нет настроенных аккаунтов → CSV fallback (dev)
+            logger.warning("collect_fb_task: no FB accounts configured for tenant %s, using CSV", tenant_id)
+            rows = get_spend_data(account_id="", date_from=yesterday, date_to=today, tenant_id=tenant_id)
+        else:
+            rows = []
+            for fb_act_id, enc_token, iv, tag in accounts:
+                try:
+                    access_token = decrypt(bytes(enc_token), bytes(iv), bytes(tag))
+                    account_rows = get_spend_data(
+                        account_id=fb_act_id,
+                        date_from=yesterday,
+                        date_to=today,
+                        tenant_id=tenant_id,
+                        access_token=access_token,
+                    )
+                    rows.extend(account_rows)
+                except FBAuthError:
+                    logger.error("collect_fb_task: FB token invalid for account %s, skipping", fb_act_id)
+                except FBUnavailableError as exc:
+                    logger.warning("collect_fb_task: FB unavailable for %s: %s", fb_act_id, exc)
+                    raise self.retry(exc=exc)
+
         if rows:
             inserted = insert_rows(CH_TABLE, rows, CH_COLUMNS)
             logger.info("collect_fb_task: inserted %d rows", inserted)
             return inserted
         return 0
+
     except Exception as exc:
         logger.exception("collect_fb_task failed: %s", exc)
         raise self.retry(exc=exc)
